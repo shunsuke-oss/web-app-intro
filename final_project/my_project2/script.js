@@ -1,8 +1,8 @@
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
-let screenWidth, screenHeight;
 const ASPECT_RATIO = 16 / 9;
+let screenWidth, screenHeight;
 
 function resizeCanvas() {
     let windowWidth = window.innerWidth;
@@ -20,62 +20,127 @@ function resizeCanvas() {
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
-const baseMap = [
-    [1, 1, 1, 1, 1, 1, 1, 1],
-    [1, 0, 0, 0, 0, 0, 0, 1],
-    [1, 0, 1, 0, 1, 0, 0, 1],
-    [1, 0, 1, 0, 1, 0, 0, 1],
-    [1, 0, 0, 0, 0, 0, 0, 1],
-    [1, 1, 1, 1, 1, 1, 1, 1],
-];
+// ==== マップ生成 ====
+const mapWidth = 20;
+const mapHeight = 20;
 
-const baseHeight = baseMap.length;
-const baseWidth = baseMap[0].length;
-const repeatFactor = 5;
+function createEmptyMap() {
+    const m = [];
+    for (let y = 0; y < mapHeight; y++) {
+        m[y] = [];
+        for (let x = 0; x < mapWidth; x++) {
+            m[y][x] = (x === 0 || x === mapWidth - 1 || y === 0 || y === mapHeight - 1) ? 1 : 0;
+        }
+    }
+    return m;
+}
 
-const mapHeight = baseHeight * repeatFactor;
-const mapWidth = baseWidth * repeatFactor;
+let map = createEmptyMap();
 
-let map = Array.from({ length: mapHeight }, (_, y) =>
-    Array.from({ length: mapWidth }, (_, x) => {
-        const tileY = Math.floor(y / baseHeight);
-        const tileX = Math.floor(x / baseWidth);
+const wallPatterns = {
+    L: [[0, 0], [1, 0], [0, 1]],
+    I: [[0, 0], [1, 0], [2, 0]],
+    O: [[0, 0], [1, 0], [0, 1], [1, 1]],
+};
 
-        const localY = y % baseHeight;
-        const localX = x % baseWidth;
+function generateRandomWalls(map, attempts = 30) {
+    for (let i = 0; i < attempts; i++) {
+        const keys = Object.keys(wallPatterns);
+        const pattern = wallPatterns[keys[Math.floor(Math.random() * keys.length)]];
+        const maxX = mapWidth - 2 - Math.max(...pattern.map(p => p[0]));
+        const maxY = mapHeight - 2 - Math.max(...pattern.map(p => p[1]));
+        const x = 1 + Math.floor(Math.random() * maxX);
+        const y = 1 + Math.floor(Math.random() * maxY);
 
-        // 元マップからコピー
-        let value = baseMap[localY][localX];
+        let canPlace = true;
+        for (let dy = -1; dy <= 2; dy++) {
+            for (let dx = -1; dx <= 2; dx++) {
+                const checkX = x + dx;
+                const checkY = y + dy;
+                if (map[checkY]?.[checkX] === 1) {
+                    canPlace = false;
+                    break;
+                }
+            }
+            if (!canPlace) break;
+        }
 
-        // タイル間接続：タイル境界なら通路にする
-        if (localX === 0 && tileX > 0) value = 0; // 左に通路
-        if (localY === 0 && tileY > 0) value = 0; // 上に通路
+        if (!canPlace) continue;
 
-        return value;
-    })
-);
+        for (const [px, py] of pattern) {
+            map[y + py][x + px] = 1;
+        }
+    }
+}
+generateRandomWalls(map);
 
+function findSafePlayerStart() {
+    for (let y = 1; y < mapHeight - 1; y++) {
+        for (let x = 1; x < mapWidth - 1; x++) {
+            if (
+                map[y][x] === 0 &&
+                map[y - 1][x] === 0 &&
+                map[y + 1][x] === 0 &&
+                map[y][x - 1] === 0 &&
+                map[y][x + 1] === 0
+            ) {
+                return { x: x + 0.5, y: y + 0.5 };
+            }
+        }
+    }
+    return { x: 1.5, y: 1.5 };
+}
 
-
+const start = findSafePlayerStart();
 let player = {
-    x: 3.5,
-    y: 3.5,
+    x: start.x,
+    y: start.y,
     dir: 0,
     fov: Math.PI / 3,
     moveSpeed: 0.05,
     rotSpeed: 0.03,
+    hp: 100,
+    alive: true
 };
 
-let playerHP = 100;
-let isInvincible = false;
-let invincibleTimer = 0;
 let gunKick = 0;
-
 const keys = {};
-window.addEventListener('keydown', (e) => keys[e.key.toLowerCase()] = true);
-window.addEventListener('keyup', (e) => keys[e.key.toLowerCase()] = false);
+
+window.addEventListener('keydown', (e) => {
+    keys[e.key] = true;
+    if (!player.alive && e.key === ' ') {
+        restartGame();
+    }
+});
+
+window.addEventListener('keyup', (e) => keys[e.key] = false);
 
 const gunSound = document.getElementById('gunSound');
+
+function drawHPBar() {
+    const barWidth = 200;
+    const barHeight = 20;
+    const margin = 20;
+    const x = margin;
+    const y = canvas.height - barHeight - margin;
+    const hpRatio = player.hp / 100;
+    let color = 'green';
+    if (player.hp < 50) color = 'yellow';
+    if (player.hp < 30) color = 'red';
+
+    ctx.strokeStyle = 'white';
+    ctx.lineWidth = 2;
+    ctx.strokeRect(x, y, barWidth, barHeight);
+
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y, barWidth * hpRatio, barHeight);
+}
+
+function normalizeAngle(angle) {
+    while (angle > Math.PI) angle -= 2 * Math.PI;
+    while (angle < -Math.PI) angle += 2 * Math.PI;
+    return angle;
+}
 
 function drawGun() {
     const gunWidth = screenWidth * 0.1 * (1 + gunKick * 0.2);
@@ -87,38 +152,103 @@ function drawGun() {
     ctx.fillRect(gunX, gunY, gunWidth, gunHeight);
 }
 
-window.addEventListener('keydown', (e) => {
-    keys[e.key.toLowerCase()] = true;
-    if (e.key === 'Shift') shoot();
-});
+// === 敵処理 ===
+let enemies = [];
 
-function shoot() {
-    const maxShootingDistance = 10;
-    let closestEnemy = null;
-    let closestDistance = Infinity;
+function findEnemySpawnPositions(count) {
+    const positions = [];
+    for (let y = 1; y < mapHeight - 1; y++) {
+        for (let x = 1; x < mapWidth - 1; x++) {
+            if (
+                map[y][x] === 0 &&
+                map[y - 1][x] === 0 &&
+                map[y + 1][x] === 0 &&
+                map[y][x - 1] === 0 &&
+                map[y][x + 1] === 0
+            ) {
+                positions.push({ x: x + 0.5, y: y + 0.5 });
+            }
+        }
+    }
+    for (let i = positions.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [positions[i], positions[j]] = [positions[j], positions[i]];
+    }
+    return positions.slice(0, count);
+}
 
-    enemies.forEach((enemy, index) => {
-        const dx = enemy.x - player.x;
-        const dy = enemy.y - player.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
+function spawnEnemiesIfNeeded() {
+    if (enemies.length >= 5) return;
+    const newPositions = findEnemySpawnPositions(5 - enemies.length);
+    newPositions.forEach(pos => {
+        enemies.push({ x: pos.x, y: pos.y, size: 0.4, speed: 0.02 });
+    });
+}
 
-        const angleToEnemy = Math.atan2(dy, dx);
-        let angleDifference = angleToEnemy - player.dir;
-        if (angleDifference > Math.PI) angleDifference -= 2 * Math.PI;
-        if (angleDifference < -Math.PI) angleDifference += 2 * Math.PI;
+function isWall(x, y) {
+    return map[Math.floor(y)]?.[Math.floor(x)] === 1;
+}
 
-        if (Math.abs(angleDifference) < (player.fov / 20) && distance < maxShootingDistance) {
-            if (distance < closestDistance) {
-                closestDistance = distance;
-                closestEnemy = index;
+let lastDamageTime = 0;
+
+function updateEnemies(deltaTime) {
+    enemies.forEach(enemy => {
+        const dx = player.x - enemy.x;
+        const dy = player.y - enemy.y;
+        const dist = Math.hypot(dx, dy);
+
+        if (dist > 0.1) {
+            const nx = enemy.x + (dx / dist) * enemy.speed;
+            const ny = enemy.y + (dy / dist) * enemy.speed;
+            if (!isWall(nx, ny)) {
+                enemy.x = nx;
+                enemy.y = ny;
+            }
+        }
+
+        if (dist < 0.4 && player.alive) {
+            if (performance.now() - lastDamageTime > 500) {
+                player.hp -= 10;
+                lastDamageTime = performance.now();
+                enemy.x += (Math.random() - 0.5);
+                enemy.y += (Math.random() - 0.5);
+                if (player.hp <= 0) {
+                    player.hp = 0;
+                    player.alive = false;
+                }
             }
         }
     });
+}
 
-    if (closestEnemy !== null) {
-        enemies.splice(closestEnemy, 1);
-        console.log("敵を倒した！");
-    }
+function drawEnemiesOnMiniMap(scale) {
+    ctx.fillStyle = 'red';
+    enemies.forEach(enemy => {
+        ctx.beginPath();
+        ctx.arc(enemy.x * scale, enemy.y * scale, scale / 3, 0, Math.PI * 2);
+        ctx.fill();
+    });
+}
+
+function shoot() {
+    const maxDistance = 10;
+    let closest = null;
+    let minDist = Infinity;
+
+    enemies.forEach((enemy, i) => {
+        const dx = enemy.x - player.x;
+        const dy = enemy.y - player.y;
+        const dist = Math.hypot(dx, dy);
+        const angleToEnemy = Math.atan2(dy, dx);
+        const diff = normalizeAngle(angleToEnemy - player.dir);
+
+        if (Math.abs(diff) < player.fov / 10 && dist < maxDistance && dist < minDist) {
+            closest = i;
+            minDist = dist;
+        }
+    });
+
+    if (closest !== null) enemies.splice(closest, 1);
 
     gunKick = 1;
     if (gunSound) {
@@ -127,193 +257,163 @@ function shoot() {
     }
 }
 
+// === グローバルイベント ===
+canvas.addEventListener('click', () => {
+    canvas.requestPointerLock();
+});
+
+document.addEventListener('pointerlockchange', () => {
+    if (document.pointerLockElement === canvas) {
+        document.addEventListener('mousemove', onMouseMove);
+    } else {
+        document.removeEventListener('mousemove', onMouseMove);
+    }
+});
+
+function onMouseMove(e) {
+    player.dir += e.movementX * 0.002;
+    player.dir = normalizeAngle(player.dir);
+}
+
+canvas.addEventListener('mousedown', (e) => {
+    if (e.button === 0) shoot();
+});
+
 function castRays() {
-    const numRays = screenWidth;
+    const numRays = 300;
     for (let i = 0; i < numRays; i++) {
         const rayAngle = player.dir - player.fov / 2 + (i / numRays) * player.fov;
-        let distanceToWall = 0, hitWall = false;
-        const stepSize = 0.01;
-        const eyeX = Math.cos(rayAngle), eyeY = Math.sin(rayAngle);
+        let distance = 0;
+        const step = 0.01;
+        const eyeX = Math.cos(rayAngle);
+        const eyeY = Math.sin(rayAngle);
+        let hit = false;
 
-        while (!hitWall && distanceToWall < 20) {
-            distanceToWall += stepSize;
-            const testX = Math.floor(player.x + eyeX * distanceToWall);
-            const testY = Math.floor(player.y + eyeY * distanceToWall);
-
-            if (testX < 0 || testX >= mapWidth || testY < 0 || testY >= mapHeight || map[testY][testX] === 1) {
-                hitWall = true;
-            }
+        while (!hit && distance < 20) {
+            distance += step;
+            const testX = Math.floor(player.x + eyeX * distance);
+            const testY = Math.floor(player.y + eyeY * distance);
+            if (map[testY]?.[testX] === 1) hit = true;
         }
 
-        let ceiling = (screenHeight / 2) - screenHeight / distanceToWall;
-        let floor = screenHeight - ceiling;
-        const correctedDist = distanceToWall * Math.cos(rayAngle - player.dir);
-        const brightness = Math.max(0, 1 - correctedDist / 10);
+        const correctedDist = distance * Math.cos(rayAngle - player.dir);
+        const brightness = Math.max(0.3, 1 - correctedDist / 10);
 
-        ctx.fillStyle = `rgba(255,255,255,${brightness})`;
-        ctx.fillRect(i, ceiling, 1, floor - ceiling);
+        const ceiling = screenHeight / 2 - screenHeight / correctedDist;
+        const floor = screenHeight - ceiling;
+        const wallHeight = floor - ceiling;
 
-        ctx.fillStyle = '#222';
-        ctx.fillRect(i, floor, 1, screenHeight - floor);
+        const wallShade = `rgba(150,150,150,${brightness})`;
+        const drawX = (i / numRays) * screenWidth;
+        const drawW = screenWidth / numRays;
+
+        ctx.fillStyle = wallShade;
+        ctx.fillRect(drawX, ceiling, drawW, wallHeight);
     }
 }
 
-const enemies = [
-    { x: 5.5, y: 3.5, size: 0.5 },
-    { x: 2.5, y: 4.5, size: 0.5 },
-];
-
-function drawEnemies() {
-    enemies.forEach(enemy => {
-        const dx = enemy.x - player.x;
-        const dy = enemy.y - player.y;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-
-        const angleToEnemy = Math.atan2(dy, dx);
-        let angleDifference = angleToEnemy - player.dir;
-
-        if (angleDifference > Math.PI) angleDifference -= 2 * Math.PI;
-        if (angleDifference < -Math.PI) angleDifference += 2 * Math.PI;
-
-        if (Math.abs(angleDifference) < player.fov / 2) {
-            const screenX = (0.5 + angleDifference / player.fov) * screenWidth;
-            const enemyHeight = Math.min(screenHeight, screenHeight / distance * enemy.size * 50);
-            const enemyTop = (screenHeight / 2) - enemyHeight / 2;
-
-            ctx.fillStyle = 'red';
-            ctx.fillRect(screenX - enemyHeight / 4, enemyTop, enemyHeight / 2, enemyHeight);
-        }
-    });
-}
-
-function drawMiniMap() {
-    const scale = 20;
-
-    // ミニマップ表示範囲
-    const viewWidth = baseWidth;
-    const viewHeight = baseHeight;
-
-    const topLeftX = Math.max(0, Math.floor(player.x) - Math.floor(viewWidth / 2));
-    const topLeftY = Math.max(0, Math.floor(player.y) - Math.floor(viewHeight / 2));
-
-    for (let y = 0; y < viewHeight; y++) {
-        for (let x = 0; x < viewWidth; x++) {
-            const mapX = topLeftX + x;
-            const mapY = topLeftY + y;
-
-            // マップ外は描かない
-            if (mapY >= mapHeight || mapX >= mapWidth) continue;
-
-            ctx.fillStyle = map[mapY][mapX] === 1 ? 'gray' : 'black';
+function drawMiniMap(scale) {
+    for (let y = 0; y < mapHeight; y++) {
+        for (let x = 0; x < mapWidth; x++) {
+            ctx.fillStyle = map[y][x] === 1 ? 'black' : 'white';
             ctx.fillRect(x * scale, y * scale, scale, scale);
         }
     }
 
-    // プレイヤー位置をミニマップ内に描く
-    const relativeX = (player.x - topLeftX) * scale;
-    const relativeY = (player.y - topLeftY) * scale;
-    ctx.fillStyle = 'red';
-    ctx.fillRect(relativeX - 5, relativeY - 5, 10, 10);
-
-    // 向き線
-    ctx.strokeStyle = 'red';
+    ctx.fillStyle = 'blue';
     ctx.beginPath();
-    ctx.moveTo(relativeX, relativeY);
-    ctx.lineTo(
-        relativeX + Math.cos(player.dir) * 20,
-        relativeY + Math.sin(player.dir) * 20
-    );
-    ctx.stroke();
+    ctx.arc(player.x * scale, player.y * scale, scale / 2, 0, Math.PI * 2);
+    ctx.fill();
+
+    drawEnemiesOnMiniMap(scale);
 }
 
+function updatePlayer() {
+    const moveSpeed = player.moveSpeed * (keys['Shift'] ? 2 : 1);
 
-function drawUI() {
-    const barWidth = screenWidth * 0.3;
-    const barHeight = 20;
-    const barX = 20;
-    const barY = screenHeight - barHeight - 20; // 左下から20px余白
-
-    const hpRatio = playerHP / 100;
-
-    // HP残量に応じて色変更
-    let barColor;
-    if (hpRatio > 0.5) {
-        barColor = 'green';
-    } else if (hpRatio > 0.2) {
-        barColor = 'yellow';
-    } else {
-        barColor = 'red';
+    if (keys['w']) {
+        const nx = player.x + Math.cos(player.dir) * moveSpeed;
+        const ny = player.y + Math.sin(player.dir) * moveSpeed;
+        if (!isWall(nx, ny)) {
+            player.x = nx;
+            player.y = ny;
+        }
+    }
+    if (keys['s']) {
+        const nx = player.x - Math.cos(player.dir) * moveSpeed;
+        const ny = player.y - Math.sin(player.dir) * moveSpeed;
+        if (!isWall(nx, ny)) {
+            player.x = nx;
+            player.y = ny;
+        }
+    }
+    if (keys['a']) {
+        const nx = player.x + Math.cos(player.dir - Math.PI / 2) * moveSpeed;
+        const ny = player.y + Math.sin(player.dir - Math.PI / 2) * moveSpeed;
+        if (!isWall(nx, ny)) {
+            player.x = nx;
+            player.y = ny;
+        }
+    }
+    if (keys['d']) {
+        const nx = player.x + Math.cos(player.dir + Math.PI / 2) * moveSpeed;
+        const ny = player.y + Math.sin(player.dir + Math.PI / 2) * moveSpeed;
+        if (!isWall(nx, ny)) {
+            player.x = nx;
+            player.y = ny;
+        }
     }
 
-    // 背景バー（灰色）
-    ctx.fillStyle = 'gray';
-    ctx.fillRect(barX, barY, barWidth, barHeight);
+    gunKick *= 0.9;
+    if (gunKick < 0.01) gunKick = 0;
+}
 
-    // HPゲージ
-    ctx.fillStyle = barColor;
-    ctx.fillRect(barX, barY, barWidth * hpRatio, barHeight);
+function drawGameOver() {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-    // HP数値をゲージの中、左側に重ねて表示
     ctx.fillStyle = 'white';
-    ctx.font = '16px sans-serif';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(`HP: ${Math.max(0, playerHP)}`, barX + 5, barY + barHeight / 2);
+    ctx.font = 'bold 72px Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('GAME OVER', canvas.width / 2, canvas.height / 2);
+
+    ctx.font = 'bold 32px Arial';
+    ctx.fillText('Press SPACE to Restart', canvas.width / 2, canvas.height / 2 + 60);
 }
 
-function gameLoop() {
-    if (keys['arrowup'] || keys['w']) {
-        let newX = player.x + Math.cos(player.dir) * player.moveSpeed;
-        let newY = player.y + Math.sin(player.dir) * player.moveSpeed;
-        if (map[Math.floor(newY)][Math.floor(newX)] === 0) {
-            player.x = newX; player.y = newY;
-        }
+function restartGame() {
+    player.hp = 100;
+    player.alive = true;
+    player.x = start.x;
+    player.y = start.y;
+    player.dir = 0;
+    enemies = [];
+    gunKick = 0;
+    lastDamageTime = 0;
+    gameLoop();
+}
+
+// --- 初回起動 ---
+let lastTime = 0;
+
+function gameLoop(time = 0) {
+    const delta = (time - lastTime) / 1000;
+    lastTime = time;
+
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (player.alive) {
+        updatePlayer();
+        updateEnemies(delta);
+        spawnEnemiesIfNeeded();
+        castRays();
+        drawMiniMap(10);
+        drawGun();
+        drawHPBar();
+        requestAnimationFrame(gameLoop);
+    } else {
+        drawGameOver();
     }
-    if (keys['arrowdown'] || keys['s']) {
-        let newX = player.x - Math.cos(player.dir) * player.moveSpeed;
-        let newY = player.y - Math.sin(player.dir) * player.moveSpeed;
-        if (map[Math.floor(newY)][Math.floor(newX)] === 0) {
-            player.x = newX; player.y = newY;
-        }
-    }
-    if (keys['arrowleft'] || keys['a']) player.dir -= player.rotSpeed;
-    if (keys['arrowright'] || keys['d']) player.dir += player.rotSpeed;
-
-    if (gunKick > 0) gunKick -= 0.1;
-
-    // 無敵時間の経過を管理
-    if (isInvincible) {
-        invincibleTimer -= 1 / 60; // 60FPS想定
-        if (invincibleTimer <= 0) {
-            isInvincible = false;
-        }
-    }
-
-    // 敵との接触チェック
-    if (!isInvincible) {
-        enemies.forEach(enemy => {
-            const dx = enemy.x - player.x;
-            const dy = enemy.y - player.y;
-            const distance = Math.sqrt(dx * dx + dy * dy);
-            if (distance < 0.5) { // 0.5以内で接触と判定
-                playerHP -= 10;
-                isInvincible = true;
-                invincibleTimer = 2; // 2秒の無敵時間
-                console.log("敵に当たった！HP:", playerHP);
-            }
-        });
-    }
-
-    ctx.clearRect(0, 0, screenWidth, screenHeight);
-    ctx.fillStyle = '#87CEEB'; ctx.fillRect(0, 0, screenWidth, screenHeight / 2);
-    ctx.fillStyle = '#654321'; ctx.fillRect(0, screenHeight / 2, screenWidth, screenHeight / 2);
-
-    castRays();
-    drawEnemies();
-    drawMiniMap();
-    drawGun();
-    drawUI();
-
-    requestAnimationFrame(gameLoop);
 }
 
 gameLoop();

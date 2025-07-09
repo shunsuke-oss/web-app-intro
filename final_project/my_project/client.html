@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-<meta charset="UTF-8">
+<meta charset="UTF-8" />
 <title>Raycasting Doom-like Game</title>
 <style>
   body { margin:0; overflow:hidden; background:black; }
@@ -34,38 +34,79 @@ function resizeCanvas() {
 window.addEventListener('resize', resizeCanvas);
 resizeCanvas();
 
-// ==== マップ生成 ====
-const baseMap = [
-    [1,1,1,1,1,1,1,1],
-    [1,0,0,0,0,0,0,1],
-    [1,0,1,0,1,0,0,1],
-    [1,0,1,0,1,0,0,1],
-    [1,0,0,0,0,0,0,1],
-    [1,1,1,1,1,1,1,1],
-];
-const baseHeight = baseMap.length;
-const baseWidth = baseMap[0].length;
-const repeatFactor = 5;
+// ==== 20x20マップ生成 ====
+const MAP_SIZE = 20;
+let map = [];
+// 初期化：外周1、内側0
+for(let y=0; y<MAP_SIZE; y++){
+    map[y] = [];
+    for(let x=0; x<MAP_SIZE; x++){
+        if(y===0 || y===MAP_SIZE-1 || x===0 || x===MAP_SIZE-1) map[y][x] = 1;
+        else map[y][x] = 0;
+    }
+}
 
-const mapHeight = baseHeight * repeatFactor;
-const mapWidth = baseWidth * repeatFactor;
+// L字・I字・O字壁パターン（座標は相対）
+// I字は縦か横ランダム
+const WALL_PATTERNS = {
+    L: [[0,0],[1,0],[0,1]],
+    I_H: [[0,0],[1,0],[2,0]],
+    I_V: [[0,0],[0,1],[0,2]],
+    O: [[0,0],[1,0],[0,1],[1,1]],
+};
 
-let map = Array.from({ length: mapHeight }, (_, y) =>
-    Array.from({ length: mapWidth }, (_, x) => {
-        const tileY = Math.floor(y / baseHeight);
-        const tileX = Math.floor(x / baseWidth);
-        const localY = y % baseHeight;
-        const localX = x % baseWidth;
+// マップ内に壁配置可能かチェック（壁と壁の間1マス空けるため+1マス余裕みる）
+function canPlaceWall(x,y,pattern){
+    // マップ内かつ空きありかチェック
+    for(const [dx,dy] of pattern){
+        let nx = x + dx;
+        let ny = y + dy;
+        if(nx<1 || nx>=MAP_SIZE-1 || ny<1 || ny>=MAP_SIZE-1) return false;
+        if(map[ny][nx] !== 0) return false;
+    }
+    // 周囲1マスも壁なし確認（壁同士隣接禁止）
+    for(const [dx,dy] of pattern){
+        for(let yy = -1; yy <= 1; yy++){
+            for(let xx = -1; xx <= 1; xx++){
+                let nx = x + dx + xx;
+                let ny = y + dy + yy;
+                if(nx<0 || nx>=MAP_SIZE || ny<0 || ny>=MAP_SIZE) continue;
+                if(map[ny][nx] === 1){
+                    // ただし自分のパターン内は無視
+                    if(!pattern.some(([px,py]) => px === nx - x && py === ny - y)){
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
 
-        let value = baseMap[localY][localX];
+// ランダムに壁を配置する関数
+function placeRandomWalls(count){
+    const patterns = ['L', 'I_H', 'I_V', 'O'];
+    let tries = 0;
+    while(count > 0 && tries < 1000){
+        tries++;
+        let patternName = patterns[Math.floor(Math.random()*patterns.length)];
+        let pattern = WALL_PATTERNS[patternName];
+        let x = Math.floor(Math.random()*(MAP_SIZE-4))+1; // 1〜MAP_SIZE-4の間
+        let y = Math.floor(Math.random()*(MAP_SIZE-4))+1;
 
-        if (localX === 0 && tileX > 0) value = 0;
-        if (localY === 0 && tileY > 0) value = 0;
+        // I字は縦か横ランダムなので、I_H,I_Vから選択済み
+        if(canPlaceWall(x,y,pattern)){
+            for(const [dx,dy] of pattern){
+                map[y+dy][x+dx] = 1;
+            }
+            count--;
+        }
+    }
+}
+// 例：壁を20個配置
+placeRandomWalls(20);
 
-        return value;
-    })
-);
-
+// ==== プレイヤー設定 ====
 let player = {
     x: 3.5,
     y: 3.5,
@@ -141,7 +182,7 @@ function castRays() {
             const testX=Math.floor(player.x + eyeX*distanceToWall);
             const testY=Math.floor(player.y + eyeY*distanceToWall);
 
-            if (testX<0 || testX>=mapWidth || testY<0 || testY>=mapHeight || map[testY][testX]===1) {
+            if (testX<0 || testX>=MAP_SIZE || testY<0 || testY>=MAP_SIZE || map[testY][testX]===1) {
                 hitWall=true;
             }
         }
@@ -158,10 +199,82 @@ function castRays() {
     }
 }
 
-const enemies = [
-    { x: 10.5, y: 10.5, size:0.5 },
-    { x: 30.5, y: 20.5, size:0.5 },
-];
+// ==== 敵管理 ====
+const enemies = [];
+
+const ENEMY_SIZE = 0.5;
+const ENEMY_MOVE_SPEED = 0.015;
+
+// 敵を空き通路からランダムに生成（壁でないマス）
+function spawnEnemyRandom() {
+    if(enemies.length >= 5) return; // 5体以上なら生成停止
+
+    // 空きマスをリストアップ
+    const emptySpaces = [];
+    for(let y=1; y<MAP_SIZE-1; y++){
+        for(let x=1; x<MAP_SIZE-1; x++){
+            if(map[y][x] === 0){
+                // プレイヤー位置からも離れているかチェック(近すぎるとスポーン困難なので)
+                const dx = x + 0.5 - player.x;
+                const dy = y + 0.5 - player.y;
+                const dist = Math.sqrt(dx*dx + dy*dy);
+                if(dist > 3) emptySpaces.push({x: x+0.5, y: y+0.5});
+            }
+        }
+    }
+
+    if(emptySpaces.length === 0) return;
+
+    const pos = emptySpaces[Math.floor(Math.random()*emptySpaces.length)];
+    enemies.push({x: pos.x, y: pos.y, size: ENEMY_SIZE});
+}
+
+// 30秒ごとに敵をスポーンするループ開始
+let enemySpawnInterval = setInterval(() => {
+    if(enemies.length < 5){
+        spawnEnemyRandom();
+    }
+}, 30000);
+
+// 5体以上で生成停止、2体以下で再開制御
+function checkEnemySpawnControl() {
+    if(enemies.length >= 5){
+        clearInterval(enemySpawnInterval);
+        enemySpawnInterval = null;
+    } else if(enemies.length <= 2 && !enemySpawnInterval){
+        enemySpawnInterval = setInterval(() => {
+            if(enemies.length < 5){
+                spawnEnemyRandom();
+            }
+        }, 30000);
+    }
+}
+
+// 敵の移動：プレイヤーへゆっくり追尾
+function updateEnemies(){
+    enemies.forEach(enemy=>{
+        let dx = player.x - enemy.x;
+        let dy = player.y - enemy.y;
+        let dist = Math.sqrt(dx*dx + dy*dy);
+
+        if(dist > 0.1){
+            dx /= dist;
+            dy /= dist;
+
+            // 衝突判定簡易版：敵が壁にぶつからないように微調整
+            let newX = enemy.x + dx * ENEMY_MOVE_SPEED;
+            let newY = enemy.y + dy * ENEMY_MOVE_SPEED;
+
+            // 壁衝突チェック（少しマージンをとる）
+            if(map[Math.floor(newY)][Math.floor(newX)] === 0){
+                enemy.x = newX;
+                enemy.y = newY;
+            }
+        }
+    });
+}
+
+// ==== 描画関係 ====
 
 function drawEnemies() {
     enemies.forEach(enemy => {
@@ -185,21 +298,18 @@ function drawEnemies() {
 
 function drawMiniMap() {
     const scale=20;
-    const viewWidth= baseWidth, viewHeight= baseHeight;
-    const topLeftX= Math.max(0, Math.floor(player.x)-Math.floor(viewWidth/2));
-    const topLeftY= Math.max(0, Math.floor(player.y)-Math.floor(viewHeight/2));
+    const viewWidth= MAP_SIZE, viewHeight= MAP_SIZE;
 
     for (let y=0; y<viewHeight; y++) {
         for (let x=0; x<viewWidth; x++) {
-            const mapX= topLeftX+x, mapY= topLeftY+y;
-            if (mapY>=mapHeight || mapX>=mapWidth) continue;
-            ctx.fillStyle= map[mapY][mapX]===1?'gray':'black';
+            if(y>=MAP_SIZE || x>=MAP_SIZE) continue;
+            ctx.fillStyle= map[y][x]===1?'gray':'black';
             ctx.fillRect(x*scale, y*scale, scale, scale);
         }
     }
 
-    const relativeX= (player.x-topLeftX)*scale;
-    const relativeY= (player.y-topLeftY)*scale;
+    const relativeX= player.x*scale;
+    const relativeY= player.y*scale;
     ctx.fillStyle='red';
     ctx.fillRect(relativeX-5, relativeY-5, 10, 10);
     ctx.strokeStyle='red';
@@ -224,7 +334,10 @@ function drawUI() {
     ctx.fillText(`HP:${Math.max(0,playerHP)}`, barX+5, barY+barHeight/2);
 }
 
+// ==== ゲームループ ====
+
 function gameLoop() {
+    // プレイヤー移動
     if (keys['arrowup']||keys['w']) {
         let newX=player.x+Math.cos(player.dir)*player.moveSpeed;
         let newY=player.y+Math.sin(player.dir)*player.moveSpeed;
@@ -235,29 +348,30 @@ function gameLoop() {
         let newY=player.y-Math.sin(player.dir)*player.moveSpeed;
         if(map[Math.floor(newY)]?.[Math.floor(newX)]===0){player.x=newX;player.y=newY;}
     }
-    if (keys['arrowleft']||keys['a']) player.dir-=player.rotSpeed;
-    if (keys['arrowright']||keys['d']) player.dir+=player.rotSpeed;
-    if (gunKick>0) gunKick-=0.1;
-    if (isInvincible) { invincibleTimer-=1/60; if (invincibleTimer<=0) isInvincible=false; }
-    if (!isInvincible) {
-        enemies.forEach(enemy=>{
-            const dx=enemy.x-player.x,dy=enemy.y-player.y;
-            const dist=Math.sqrt(dx*dx+dy*dy);
-            if(dist<0.5){playerHP-=10;isInvincible=true;invincibleTimer=2;}
-        });
+    if (keys['arrowleft']||keys['a']) {
+        player.dir-=player.rotSpeed;
     }
+    if (keys['arrowright']||keys['d']) {
+        player.dir+=player.rotSpeed;
+    }
+
+    if(gunKick > 0) gunKick -= 0.1;
+
+    // 敵追尾更新
+    updateEnemies();
+    checkEnemySpawnControl();
+
+    // 描画
     ctx.clearRect(0,0,screenWidth,screenHeight);
-    ctx.fillStyle='#87CEEB'; ctx.fillRect(0,0,screenWidth,screenHeight/2);
-    ctx.fillStyle='#654321'; ctx.fillRect(0,screenHeight/2,screenWidth,screenHeight/2);
     castRays();
     drawEnemies();
-    drawMiniMap();
     drawGun();
+    drawMiniMap();
     drawUI();
+
     requestAnimationFrame(gameLoop);
 }
-
-gameLoop();
+requestAnimationFrame(gameLoop);
 </script>
 </body>
 </html>
